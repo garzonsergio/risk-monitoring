@@ -1,0 +1,9 @@
+langchain
+langchain-google-genai
+langchain-qdrant
+qdrant-client
+sentence-transformers
+fastapi
+uvicorn
+requests
+python-dotenv
