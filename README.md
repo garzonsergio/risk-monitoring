@@ -54,13 +54,13 @@ Real sensor network (SIGRAN Antioquia)
                           │   Tool 3: check_all_stations_status  → scan all 49 level stations    │
                           │   Tool 4: check_active_rainfall      → live rain risk across all     │
                           │                                         sp_ and sm_ stations          │
-                          │   Tool 5: get_radar_image            → real-time rainfall radar      │
+                          │   Tool 5: check_precipitation_by_date → historical rain by date      │
+                          │   Tool 6: check_river_levels_by_date  → historical levels by date    │
                           └──────────────────────────────────┬──────────────────────────────────┘
                                                              │
                                               ┌──────────────▼──────────────┐
                                               │        FastAPI              │
                                               │     POST /ask               │
-                                              │     GET  /radar             │
                                               │     GET  /health            │
                                               └─────────────────────────────┘
 ```
@@ -73,7 +73,6 @@ Real sensor network (SIGRAN Antioquia)
 | --------------------------------------------------- | --------------- | ---------------------------------------------------------------------------------------------------------- |
 | [SIGRAN Antioquia](https://sigran.antioquia.gov.co) | Live + Historic | 116 monitoring stations across Antioquia — river levels (cm), precipitation (mm), meteorological variables |
 | Precipitation Thresholds API                        | Static          | Yellow/orange/red alert limits with duration windows for each station                                      |
-| [SIATA Radar](https://geoportal.siata.gov.co)       | Real-time       | Radar reflectivity image showing active precipitation over Antioquia                                       |
 
 **Station breakdown:**
 
@@ -87,13 +86,14 @@ Real sensor network (SIGRAN Antioquia)
 
 The agent decides which tools to call based on the question — real agentic behavior, not a fixed pipeline.
 
-| Tool                        | When the agent uses it                                                                  |
-| --------------------------- | --------------------------------------------------------------------------------------- |
-| `search_knowledge_base`     | Historical patterns (7 days), hourly rainfall history, threshold context, station info  |
-| `check_live_river_level`    | Current reading for a specific station vs its thresholds                                |
-| `check_all_stations_status` | Broad scan — which rivers are in alert right now                                        |
-| `check_active_rainfall`     | Live rain risk scan across all sp* and sm* stations with duration-weighted alert levels |
-| `get_radar_image`           | Spatial rainfall context via radar                                                      |
+| Tool                          | When the agent uses it                                                                  |
+| ----------------------------- | --------------------------------------------------------------------------------------- |
+| `search_knowledge_base`       | Historical patterns (7 days), hourly rainfall history, threshold context, station info  |
+| `check_live_river_level`      | Current reading for a specific station vs its thresholds                                |
+| `check_all_levels`            | Broad scan — which rivers are in alert right now                                        |
+| `check_active_rainfall`       | Live rain risk scan across all sp* and sm* stations with duration-weighted alert levels |
+| `check_precipitation_by_date` | Rainfall totals and hourly breakdown for a specific past date                           |
+| `check_river_levels_by_date`  | Peak river levels and alert status for a specific past date                             |
 
 ### Rainfall risk calculation
 
@@ -221,12 +221,7 @@ curl -X POST http://localhost:8005/ask \
 ```json
 {
   "question": "Is there any river in red or orange alert right now?",
-  "answer": "There are currently two rivers in red alert:\n\n• sn_1022 at Río Tamar - Vereda Tamar: 299 cm (red threshold: 257 cm)\n• sn_1041 at Quebrada Juan García - PCH - Puente Verde: 764 cm (red threshold: 296 cm)\n\nOne river is in yellow alert:\n• sn_1007 at Quebrada La Oca - Villa Mena: 265 cm (yellow threshold: 260 cm)",
-  "radar_url": "https://geoportal.siata.gov.co/fastgeoapi/geodata/radar/3/reflectividad?1774137931",
-  "radar_bounds": [
-    [5.1, -76.6],
-    [7.3, -74.3]
-  ]
+  "answer": "There are currently two rivers in red alert:\n\n• sn_1022 at Río Tamar - Vereda Tamar: 299 cm (red threshold: 257 cm)\n• sn_1041 at Quebrada Juan García - PCH - Puente Verde: 764 cm (red threshold: 296 cm)\n\nOne river is in yellow alert:\n• sn_1007 at Quebrada La Oca - Villa Mena: 265 cm (yellow threshold: 260 cm)"
 }
 ```
 
@@ -250,7 +245,7 @@ risk-monitoring/
 │   │   ├── fetch_data.py          # API clients for all SIGRAN endpoints
 │   │   └── embed_and_store.py     # Ingestion pipeline — 7-day daily + 24h hourly chunks
 │   ├── agent/
-│   │   └── agent.py               # LangChain agent + 5 tools
+│       └── agent.py               # LangChain agent + 6 tools
 │   └── api/
 │       └── main.py                # FastAPI endpoints
 ├── docker-compose.yml
@@ -264,6 +259,7 @@ risk-monitoring/
 ## What I'd add next
 
 - **Scheduled re-ingestion** — run the ingestion pipeline every 6 hours via APScheduler to keep historical data fresh
+- **Radar overlay** — integrate the [SIATA radar API](https://geoportal.siata.gov.co) as an agent tool returning a real-time reflectivity image URL with map bounds, enabling spatial rainfall context on a Leaflet.js map
 - **MCP protocol** — expose the agent tools over MCP so any MCP-compatible client (Claude Desktop, etc.) can connect
 - **Multi-location queries** — add municipality and region context to enable questions like "how is the Urabá region doing?"
 - **Alert notifications** — webhook or email when a station crosses into red alert

@@ -27,7 +27,6 @@ from app.ingest.fetch_data import (
     fetch_precipitation_by_date,
     fetch_meteo_by_date,
     fetch_levels_by_date,
-    get_radar_url,
     BASE_URL,
     PRECIP_THRESHOLDS_URL,
 )
@@ -37,7 +36,6 @@ load_dotenv()
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 COLLECTION_NAME = "antioquia_risk"
-RADAR_BOUNDS = [[5.1, -76.6], [7.3, -74.3]]
 
 # ── Embedding wrapper ─────────────────────────────────────────────────────────
 
@@ -366,21 +364,6 @@ def check_active_rainfall() -> str:
 
 
 @tool
-def get_radar_image() -> str:
-    """Get the current radar image URL showing where it is raining right now
-    in Antioquia. Returns the URL and map bounds for overlay. Use this when
-    asked about current rainfall location or rain patterns."""
-    url = get_radar_url()
-    return (
-        f"Current radar image URL: {url}\n"
-        f"Map bounds for overlay: SW corner {RADAR_BOUNDS[0]}, NE corner {RADAR_BOUNDS[1]}\n"
-        f"This image shows real-time radar reflectivity — brighter areas indicate "
-        f"active precipitation over Antioquia. Fetched at: "
-        f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
-    )
-
-
-@tool
 def check_precipitation_by_date(date_str: str) -> str:
     """USE THIS TOOL when asked about past or yesterday's rainfall, precipitation,
     or rain. This tool fetches REAL data from live sensors.
@@ -570,7 +553,6 @@ TOOLS = [
     check_live_river_level,
     check_all_levels,
     check_active_rainfall,
-    get_radar_image,
     check_precipitation_by_date,
     check_river_levels_by_date,
 ]
@@ -590,7 +572,6 @@ You have 5 tools:
 - check_all_stations_status: for a broad overview of alert status across all rivers
 - check_active_rainfall: for which stations are reporting rainfall right now (live scan
   of all sp_ precipitation and sm_ meteorological stations)
-- get_radar_image: for spatial rainfall context via radar
 - check_precipitation_by_date: for rainfall data on a specific past date with hourly breakdown
 
 Guidelines:
@@ -604,7 +585,6 @@ Guidelines:
 - Use clear alert language: normal / yellow / orange / red.
 - For "where is it raining now" questions, use check_active_rainfall.
 - For "when/where did it rain in the last 7 days" questions, use search_knowledge_base.
-- When relevant, complement with get_radar_image for spatial context.
 - Answer in the same language the user asks (Spanish or English).
 - Be concise but precise — this is an operational tool, not a chatbot.
 
@@ -668,8 +648,6 @@ def ask(question: str) -> dict:
     return {
         "question": question,
         "answer": response.content,
-        "radar_url": get_radar_url(),
-        "radar_bounds": RADAR_BOUNDS,
     }
 
 

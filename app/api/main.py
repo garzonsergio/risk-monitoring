@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 
 logging.basicConfig(level=logging.INFO)
-from app.agent.agent import ask, get_radar_url, RADAR_BOUNDS
+from app.agent.agent import ask
 
 load_dotenv()
 
@@ -23,8 +23,6 @@ class QuestionRequest(BaseModel):
 class AgentResponse(BaseModel):
     question: str
     answer: str
-    radar_url: str
-    radar_bounds: list
 
 
 @app.get("/")
@@ -35,7 +33,6 @@ def root():
         "endpoints": {
             "ask": "POST /ask — ask the agent a question",
             "health": "GET /health — check service status",
-            "radar": "GET /radar — get current radar image URL",
         },
     }
 
@@ -45,15 +42,6 @@ def health():
     return {
         "status": "healthy",
         "qdrant": os.getenv("QDRANT_URL", "http://localhost:6333"),
-    }
-
-
-@app.get("/radar")
-def radar():
-    return {
-        "radar_url": get_radar_url(),
-        "bounds": RADAR_BOUNDS,
-        "description": "Real-time radar reflectivity over Antioquia",
     }
 
 
