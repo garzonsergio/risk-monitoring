@@ -1,7 +1,10 @@
 import os
 import requests
 from datetime import datetime, timezone
-from langchain_google_genai import ChatGoogleGenerativeAI
+
+# from langchain_google_genai import ChatGoogleGenerativeAI
+# from langchain_openai import ChatOpenAI
+from langchain_ollama import ChatOllama
 from langchain_qdrant import QdrantVectorStore
 from langchain.tools import tool
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
@@ -22,10 +25,11 @@ load_dotenv()
 
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 COLLECTION_NAME = "antioquia_risk"
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+# GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 RADAR_BOUNDS = [[5.1, -76.6], [7.3, -74.3]]
 
 # ── Embedding wrapper ─────────────────────────────────────────────────────────
+
 
 class LocalEmbeddings(Embeddings):
     def __init__(self):
@@ -37,14 +41,31 @@ class LocalEmbeddings(Embeddings):
     def embed_query(self, text: str) -> list[float]:
         return self.model.encode(text).tolist()
 
+
 # ── LLM + Retriever ───────────────────────────────────────────────────────────
 
+# def get_llm():
+#     return ChatGoogleGenerativeAI(
+#         model="gemini-2.0-flash",
+#         google_api_key=GEMINI_API_KEY,
+#         temperature=0.2,
+#     )
+
+# def get_llm():
+#     return ChatOpenAI(
+#         model="gpt-4o",
+#         api_key=os.getenv("GITHUB_COPILOT_TOKEN"),
+#         base_url="https://api.githubcopilot.com",
+#         temperature=0.2,
+#     )
+
+
 def get_llm():
-    return ChatGoogleGenerativeAI(
-        model="gemini-2.0-flash",
-        google_api_key=GEMINI_API_KEY,
+    return ChatOllama(
+        model="llama3.1:8b",
         temperature=0.2,
     )
+
 
 def get_retriever():
     client = QdrantClient(url=QDRANT_URL)
@@ -55,7 +76,9 @@ def get_retriever():
     )
     return store.as_retriever(search_kwargs={"k": 8})
 
+
 # ── Tools ─────────────────────────────────────────────────────────────────────
+
 
 @tool
 def search_knowledge_base(query: str) -> str:
@@ -67,6 +90,7 @@ def search_knowledge_base(query: str) -> str:
     if not docs:
         return "No relevant information found in the knowledge base."
     return "\n\n---\n\n".join(d.page_content for d in docs)
+
 
 @tool
 def check_live_river_level(station_codigo: str) -> str:
@@ -94,9 +118,13 @@ def check_live_river_level(station_codigo: str) -> str:
     if current >= roja:
         status = f"🔴 RED ALERT — {current} cm exceeds red threshold of {roja} cm"
     elif current >= naranja:
-        status = f"🟠 ORANGE ALERT — {current} cm exceeds orange threshold of {naranja} cm"
+        status = (
+            f"🟠 ORANGE ALERT — {current} cm exceeds orange threshold of {naranja} cm"
+        )
     elif current >= amarilla:
-        status = f"🟡 YELLOW ALERT — {current} cm exceeds yellow threshold of {amarilla} cm"
+        status = (
+            f"🟡 YELLOW ALERT — {current} cm exceeds yellow threshold of {amarilla} cm"
+        )
     else:
         status = f"✅ NORMAL — {current} cm is below all alert thresholds (yellow: {amarilla} cm)"
 
@@ -107,6 +135,7 @@ def check_live_river_level(station_codigo: str) -> str:
         f"Thresholds — yellow: {amarilla} cm | orange: {naranja} cm | red: {roja} cm"
     )
 
+
 @tool
 def check_all_stations_status() -> str:
     """Check live status of ALL river level stations and flag any that are
@@ -116,7 +145,8 @@ def check_all_stations_status() -> str:
         response = requests.get(f"{BASE_URL}/estaciones/", timeout=30)
         response.raise_for_status()
         stations = [
-            s for s in response.json().get("values", [])
+            s
+            for s in response.json().get("values", [])
             if s.get("codigo", "").startswith("sn_") and s.get("activo")
         ]
     except Exception as e:
@@ -136,15 +166,23 @@ def check_all_stations_status() -> str:
 
         current = float(latest["nivel"])
         if current >= thresholds["alerta_roja"]:
-            alerts["red"].append(f"{codigo} at {ubicacion}: {current} cm (red threshold: {thresholds['alerta_roja']} cm)")
+            alerts["red"].append(
+                f"{codigo} at {ubicacion}: {current} cm (red threshold: {thresholds['alerta_roja']} cm)"
+            )
         elif current >= thresholds["alerta_naranja"]:
-            alerts["orange"].append(f"{codigo} at {ubicacion}: {current} cm (orange threshold: {thresholds['alerta_naranja']} cm)")
+            alerts["orange"].append(
+                f"{codigo} at {ubicacion}: {current} cm (orange threshold: {thresholds['alerta_naranja']} cm)"
+            )
         elif current >= thresholds["alerta_amarilla"]:
-            alerts["yellow"].append(f"{codigo} at {ubicacion}: {current} cm (yellow threshold: {thresholds['alerta_amarilla']} cm)")
+            alerts["yellow"].append(
+                f"{codigo} at {ubicacion}: {current} cm (yellow threshold: {thresholds['alerta_amarilla']} cm)"
+            )
         else:
             alerts["normal"].append(codigo)
 
-    lines = [f"🌊 Live river status across Antioquia ({datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')})\n"]
+    lines = [
+        f"🌊 Live river status across Antioquia ({datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')})\n"
+    ]
     if alerts["red"]:
         lines.append(f"🔴 RED ALERT ({len(alerts['red'])} stations):")
         lines.extend(f"  • {s}" for s in alerts["red"])
@@ -157,6 +195,7 @@ def check_all_stations_status() -> str:
     lines.append(f"\n✅ Normal: {len(alerts['normal'])} stations below all thresholds")
 
     return "\n".join(lines)
+
 
 @tool
 def get_radar_image() -> str:
@@ -171,6 +210,7 @@ def get_radar_image() -> str:
         f"active precipitation over Antioquia. Fetched at: "
         f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
     )
+
 
 # ── Tools registry ────────────────────────────────────────────────────────────
 
@@ -205,9 +245,11 @@ Guidelines:
 
 # ── Agent loop ────────────────────────────────────────────────────────────────
 
+
 def build_llm_with_tools():
     llm = get_llm()
     return llm.bind_tools(TOOLS)
+
 
 def ask(question: str) -> dict:
     llm = build_llm_with_tools()
@@ -232,14 +274,19 @@ def ask(question: str) -> dict:
 
             tool_fn = TOOLS_MAP.get(tool_name)
             if tool_fn:
-                result = tool_fn.invoke(tool_args)
+                try:
+                    result = tool_fn.invoke(tool_args)
+                except Exception:
+                    result = tool_fn.invoke({})
             else:
                 result = f"Tool {tool_name} not found."
 
-            messages.append(ToolMessage(
-                content=str(result),
-                tool_call_id=tool_call["id"],
-            ))
+            messages.append(
+                ToolMessage(
+                    content=str(result),
+                    tool_call_id=tool_call["id"],
+                )
+            )
 
     return {
         "question": question,
@@ -247,6 +294,7 @@ def ask(question: str) -> dict:
         "radar_url": get_radar_url(),
         "radar_bounds": RADAR_BOUNDS,
     }
+
 
 # ── Quick test ────────────────────────────────────────────────────────────────
 
@@ -259,6 +307,6 @@ if __name__ == "__main__":
     for q in questions:
         print(f"\n{'='*60}")
         print(f"Q: {q}")
-        print('='*60)
+        print("=" * 60)
         result = ask(q)
         print(f"\nA: {result['answer']}")
