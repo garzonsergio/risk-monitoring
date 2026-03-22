@@ -1,7 +1,10 @@
 import os
+import logging
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from dotenv import load_dotenv
+
+logging.basicConfig(level=logging.INFO)
 from app.agent.agent import ask, get_radar_url, RADAR_BOUNDS
 
 load_dotenv()
@@ -12,14 +15,17 @@ app = FastAPI(
     version="1.0.0",
 )
 
+
 class QuestionRequest(BaseModel):
     question: str
+
 
 class AgentResponse(BaseModel):
     question: str
     answer: str
     radar_url: str
     radar_bounds: list
+
 
 @app.get("/")
 def root():
@@ -30,12 +36,17 @@ def root():
             "ask": "POST /ask — ask the agent a question",
             "health": "GET /health — check service status",
             "radar": "GET /radar — get current radar image URL",
-        }
+        },
     }
+
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "qdrant": os.getenv("QDRANT_URL", "http://localhost:6333")}
+    return {
+        "status": "healthy",
+        "qdrant": os.getenv("QDRANT_URL", "http://localhost:6333"),
+    }
+
 
 @app.get("/radar")
 def radar():
@@ -45,6 +56,7 @@ def radar():
         "description": "Real-time radar reflectivity over Antioquia",
     }
 
+
 @app.post("/ask", response_model=AgentResponse)
 def ask_agent(request: QuestionRequest):
     if not request.question.strip():
@@ -53,4 +65,5 @@ def ask_agent(request: QuestionRequest):
         result = ask(request.question)
         return AgentResponse(**result)
     except Exception as e:
+        logging.exception("Error in /ask handler")
         raise HTTPException(status_code=500, detail=str(e))
