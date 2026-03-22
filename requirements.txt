@@ -1,6 +1,7 @@
 langchain
-langchain-google-genai
+langchain-openai
 langchain-qdrant
+langchain-ollama
 qdrant-client
 sentence-transformers
 fastapi
