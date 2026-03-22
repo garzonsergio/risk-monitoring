@@ -41,6 +41,28 @@ def classify_stations(stations: list[dict]) -> dict[str, list[dict]]:
     print(f"  → Level: {len(level)} | Meteo: {len(meteo)} | Precip: {len(precip)}")
     return {"level": level, "meteo": meteo, "precip": precip}
 
+# ── Station Locations ─────────────────────────────────────────────────────────────────
+def fetch_location_name(lat: str, lon: str) -> str:
+    """Reverse geocode coordinates using OpenStreetMap Nominatim."""
+    try:
+        url = "https://nominatim.openstreetmap.org/reverse"
+        params = {"lat": lat, "lon": lon, "format": "json"}
+        headers = {"User-Agent": "antioquia-risk-monitoring/1.0"}
+        response = requests.get(url, params=params, headers=headers, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        address = data.get("address", {})
+        # Build a clean location string from most to least specific
+        parts = [
+            address.get("hamlet") or address.get("village") or
+            address.get("suburb") or address.get("neighbourhood"),
+            address.get("municipality") or address.get("city") or
+            address.get("town") or address.get("county"),
+            address.get("state"),
+        ]
+        return ", ".join(p for p in parts if p) or data.get("display_name", "unknown location")
+    except Exception:
+        return "unknown location"
 
 # ── Thresholds ────────────────────────────────────────────────────────────────
 
@@ -77,7 +99,7 @@ def fetch_all_precip_thresholds() -> list[dict]:
 
 # ── Time-series data ──────────────────────────────────────────────────────────
 
-
+# Levels
 def fetch_recent_levels(station_codigo: str, days: int = 7) -> list[dict]:
     """Fetch recent river level readings — up to 7 days of data."""
     since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
@@ -105,6 +127,34 @@ def fetch_recent_levels(station_codigo: str, days: int = 7) -> list[dict]:
             break
     return readings
 
+def fetch_levels_by_date(station_codigo: str, date_str: str) -> list[dict]:
+    """Fetch river level readings for a specific date (YYYY-MM-DD)."""
+    since = f"{date_str}T00:00:00Z"
+    until = f"{date_str}T23:59:59Z"
+    try:
+        url = f"{BASE_URL}/estaciones/{station_codigo}/nivel/?calidad=1&size=288"
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+        values = response.json().get("values", [])
+        return [
+            v for v in values
+            if since <= v["fecha"] <= until
+        ]
+    except Exception:
+        return []
+
+def fetch_latest_level(station_codigo: str) -> Optional[dict]:
+    """Fetch only the most recent level reading for a station."""
+    try:
+        url = f"{BASE_URL}/estaciones/{station_codigo}/nivel/?calidad=1&size=1"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        values = response.json().get("values", [])
+        return values[0] if values else None
+    except Exception:
+        return None
+
+# Precipitation
 
 def fetch_recent_precipitation(station_codigo: str, days: int = 7) -> list[dict]:
     """Fetch recent precipitation readings — up to 7 days of data."""
@@ -132,18 +182,23 @@ def fetch_recent_precipitation(station_codigo: str, days: int = 7) -> list[dict]
             break
     return readings
 
-
-def fetch_latest_level(station_codigo: str) -> Optional[dict]:
-    """Fetch only the most recent level reading for a station."""
+def fetch_precipitation_by_date(station_codigo: str, date_str: str) -> list[dict]:
+    """Fetch precipitation readings for a specific date (YYYY-MM-DD).
+    Only returns readings with actual rainfall (muestra > 0)."""
+    since = f"{date_str}T00:00:00Z"
+    until = f"{date_str}T23:59:59Z"
     try:
-        url = f"{BASE_URL}/estaciones/{station_codigo}/nivel/?calidad=1&size=1"
-        response = requests.get(url, timeout=10)
+        url = f"{BASE_URL}/estaciones/{station_codigo}/precipitacion/?calidad=1&size=288"
+        response = requests.get(url, timeout=15)
         response.raise_for_status()
         values = response.json().get("values", [])
-        return values[0] if values else None
+        return [
+            v for v in values
+            if since <= v["fecha"] <= until
+            and float(v.get("muestra", 0)) > 0
+        ]
     except Exception:
-        return None
-
+        return []
 
 def fetch_latest_precipitation(station_codigo: str) -> Optional[dict]:
     """Fetch only the most recent precipitation reading for a station."""
@@ -156,28 +211,17 @@ def fetch_latest_precipitation(station_codigo: str) -> Optional[dict]:
     except Exception:
         return None
 
+# Meteorology
 
-def fetch_latest_meteo(station_codigo: str) -> Optional[dict]:
-    """Fetch only the most recent meteorological reading for a station."""
-    try:
-        url = f"{BASE_URL}/estaciones/{station_codigo}/meteorologia/?calidad_lluvia=1&size=1"
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        values = response.json().get("values", [])
-        return values[0] if values else None
-    except Exception:
-        return None
-
-
-def fetch_recent_meteo(station_codigo: str, hours: int = 24) -> list[dict]:
-    """Fetch recent meteorological readings for the last N hours."""
-    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(
+def fetch_recent_meteo(station_codigo: str, days: int = 7) -> list[dict]:
+    """Fetch recent meteorological readings — up to 7 days of data."""
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
     readings = []
     url = f"{BASE_URL}/estaciones/{station_codigo}/meteorologia/?calidad_lluvia=1&size=288"
     pages_fetched = 0
-    max_pages = 3  # 3 × 288 readings comfortably covers 24h at 5-min intervals
+    max_pages = 7  
 
     while url and pages_fetched < max_pages:
         try:
@@ -194,6 +238,37 @@ def fetch_recent_meteo(station_codigo: str, hours: int = 24) -> list[dict]:
         except Exception:
             break
     return readings
+
+def fetch_meteo_by_date(station_codigo: str, date_str: str) -> list[dict]:
+    """Fetch precipitation readings for a specific date (YYYY-MM-DD).
+    Only returns readings with actual rainfall (muestra > 0)."""
+    since = f"{date_str}T00:00:00Z"
+    until = f"{date_str}T23:59:59Z"
+    try:
+        url = f"{BASE_URL}/estaciones/{station_codigo}/meteorologia/?calidad_lluvia=1&size=288"
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+        values = response.json().get("values", [])
+        return [
+            v for v in values
+            if since <= v["fecha"] <= until
+            and float(v.get("lluvia", 0)) > 0
+        ]
+    except Exception:
+        return []
+
+def fetch_latest_meteo(station_codigo: str) -> Optional[dict]:
+    """Fetch only the most recent meteorological reading for a station."""
+    try:
+        url = f"{BASE_URL}/estaciones/{station_codigo}/meteorologia/?calidad_lluvia=1&size=1"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        values = response.json().get("values", [])
+        return values[0] if values else None
+    except Exception:
+        return None
+
+
 
 
 # ── Radar ─────────────────────────────────────────────────────────────────────
