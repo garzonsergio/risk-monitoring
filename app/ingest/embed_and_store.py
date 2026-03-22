@@ -24,11 +24,14 @@ model = SentenceTransformer(EMBEDDING_MODEL)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+
 def embed(text: str) -> list[float]:
     return model.encode(text).tolist()
 
+
 def upsert_points(points: list[PointStruct]):
     client.upsert(collection_name=COLLECTION_NAME, points=points)
+
 
 def ensure_collection():
     existing = [c.name for c in client.get_collections().collections]
@@ -41,7 +44,10 @@ def ensure_collection():
     else:
         print(f"✓ Collection '{COLLECTION_NAME}' already exists")
 
-def alert_level_label(current: float, amarilla: float, naranja: float, roja: float) -> str:
+
+def alert_level_label(
+    current: float, amarilla: float, naranja: float, roja: float
+) -> str:
     if current >= roja:
         return "RED ALERT — above red threshold"
     elif current >= naranja:
@@ -51,7 +57,9 @@ def alert_level_label(current: float, amarilla: float, naranja: float, roja: flo
     else:
         return "normal — below all alert thresholds"
 
+
 # ── Text chunk generators ─────────────────────────────────────────────────────
+
 
 def station_to_text(station: dict, station_type: str) -> str:
     codigo = station["codigo"]
@@ -84,6 +92,7 @@ def station_to_text(station: dict, station_type: str) -> str:
             f"It measures rainfall in mm. Description: {nombre}."
         )
 
+
 def level_threshold_to_text(threshold: dict, station: dict) -> str:
     codigo = threshold["station"]
     ubicacion = station.get("ubicacion", "unknown location")
@@ -98,6 +107,7 @@ def level_threshold_to_text(threshold: dict, station: dict) -> str:
         f"All values are in centimeters (cm)."
     )
 
+
 def precip_threshold_to_text(threshold: dict) -> str:
     estacion = threshold["estacion"]
     location = threshold.get("location", "unknown location")
@@ -107,6 +117,7 @@ def precip_threshold_to_text(threshold: dict) -> str:
         f"Orange alert: {threshold['umbral_naranja']} mm over {threshold['duracion_naranja']} hours. "
         f"Red alert: {threshold['umbral_rojo']} mm over {threshold['duracion_rojo']} hours."
     )
+
 
 def level_readings_to_daily_summary(
     codigo: str, station: dict, readings: list[dict], thresholds: dict
@@ -144,6 +155,7 @@ def level_readings_to_daily_summary(
         )
     return summaries
 
+
 def precip_readings_to_daily_summary(
     codigo: str, station: dict, readings: list[dict], threshold: dict | None
 ) -> list[str]:
@@ -176,7 +188,77 @@ def precip_readings_to_daily_summary(
         )
     return summaries
 
+
+def level_readings_to_hourly_summary(
+    codigo: str, station: dict, readings: list[dict], thresholds: dict, hours: int = 24
+) -> list[str]:
+    if not readings:
+        return []
+    ubicacion = station.get("ubicacion", "unknown location")
+    fuente = station.get("fuente") or "unknown water source"
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    recent = [r for r in readings if r["fecha"] >= cutoff]
+    if not recent:
+        return []
+    by_hour: dict[str, list[float]] = {}
+    for r in recent:
+        hour = r["fecha"][:13]  # "YYYY-MM-DDTHH"
+        try:
+            by_hour.setdefault(hour, []).append(float(r["nivel"]))
+        except (ValueError, KeyError):
+            continue
+    summaries = []
+    for hour, levels in sorted(by_hour.items()):
+        avg = round(sum(levels) / len(levels), 1)
+        max_level = round(max(levels), 1)
+        status = alert_level_label(
+            max_level,
+            thresholds["alerta_amarilla"],
+            thresholds["alerta_naranja"],
+            thresholds["alerta_roja"],
+        )
+        summaries.append(
+            f"At {hour}:00 UTC, river level station {codigo} at {ubicacion} "
+            f"monitoring {fuente} recorded: "
+            f"average {avg} cm, maximum {max_level} cm. "
+            f"Alert status: {status}."
+        )
+    return summaries
+
+
+def precip_readings_to_hourly_summary(
+    codigo: str, station: dict, readings: list[dict], hours: int = 24
+) -> list[str]:
+    if not readings:
+        return []
+    ubicacion = station.get("ubicacion", "unknown location")
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    recent = [r for r in readings if r["fecha"] >= cutoff]
+    if not recent:
+        return []
+    by_hour: dict[str, list[float]] = {}
+    for r in recent:
+        hour = r["fecha"][:13]
+        try:
+            by_hour.setdefault(hour, []).append(float(r["muestra"]))
+        except (ValueError, KeyError):
+            continue
+    summaries = []
+    for hour, values in sorted(by_hour.items()):
+        total = round(sum(values), 1)
+        summaries.append(
+            f"At {hour}:00 UTC, precipitation station {codigo} at {ubicacion} "
+            f"recorded {total} mm of rainfall in that hour."
+        )
+    return summaries
+
+
 # ── Per-station workers (run in threads) ──────────────────────────────────────
+
 
 def process_level_station(station: dict) -> list[PointStruct]:
     """Fetch + embed everything for one level station. Runs in a thread."""
@@ -189,15 +271,32 @@ def process_level_station(station: dict) -> list[PointStruct]:
 
     # Threshold chunk
     text = level_threshold_to_text(thresholds, station)
-    chunks.append({"text": text, "metadata": {"type": "level_threshold", "codigo": codigo}})
+    chunks.append(
+        {"text": text, "metadata": {"type": "level_threshold", "codigo": codigo}}
+    )
 
-    # Historical summaries
-    readings = fetch_recent_levels(codigo, days=30)
-    for summary in level_readings_to_daily_summary(codigo, station, readings, thresholds):
-        chunks.append({"text": summary, "metadata": {"type": "level_history", "codigo": codigo}})
+    # Historical summaries — 7 days daily + last 24h hourly
+    readings = fetch_recent_levels(codigo, days=7)
+    for summary in level_readings_to_daily_summary(
+        codigo, station, readings, thresholds
+    ):
+        chunks.append(
+            {"text": summary, "metadata": {"type": "level_history", "codigo": codigo}}
+        )
+    for summary in level_readings_to_hourly_summary(
+        codigo, station, readings, thresholds
+    ):
+        chunks.append(
+            {"text": summary, "metadata": {"type": "level_hourly", "codigo": codigo}}
+        )
 
-    print(f"  ✓ {codigo}: {len(readings)} readings → {len(chunks) - 1} daily summaries")
+    daily = sum(1 for c in chunks if c["metadata"]["type"] == "level_history")
+    hourly = sum(1 for c in chunks if c["metadata"]["type"] == "level_hourly")
+    print(
+        f"  ✓ {codigo}: {len(readings)} readings → {daily} daily + {hourly} hourly summaries"
+    )
     return chunks
+
 
 def process_precip_station(args: tuple) -> list[dict]:
     """Fetch + embed everything for one precip station. Runs in a thread."""
@@ -207,16 +306,28 @@ def process_precip_station(args: tuple) -> list[dict]:
 
     if threshold:
         text = precip_threshold_to_text(threshold)
-        chunks.append({"text": text, "metadata": {"type": "precip_threshold", "codigo": codigo}})
+        chunks.append(
+            {"text": text, "metadata": {"type": "precip_threshold", "codigo": codigo}}
+        )
 
-    readings = fetch_recent_precipitation(codigo, days=30)
-    for summary in precip_readings_to_daily_summary(codigo, station, readings, threshold):
-        chunks.append({"text": summary, "metadata": {"type": "precip_history", "codigo": codigo}})
+    readings = fetch_recent_precipitation(codigo, days=7)
+    for summary in precip_readings_to_daily_summary(
+        codigo, station, readings, threshold
+    ):
+        chunks.append(
+            {"text": summary, "metadata": {"type": "precip_history", "codigo": codigo}}
+        )
+    for summary in precip_readings_to_hourly_summary(codigo, station, readings):
+        chunks.append(
+            {"text": summary, "metadata": {"type": "precip_hourly", "codigo": codigo}}
+        )
 
     print(f"  ✓ {codigo}: {len(readings)} readings → {len(chunks)} chunks")
     return chunks
 
+
 # ── Main ingestion pipeline ───────────────────────────────────────────────────
+
 
 def run_ingestion():
     start = time.time()
@@ -237,13 +348,24 @@ def run_ingestion():
     for stype, station_list in classified.items():
         for s in station_list:
             text = station_to_text(s, stype)
-            all_chunks.append({"text": text, "metadata": {"type": "station_info", "station_type": stype, "codigo": s["codigo"]}})
+            all_chunks.append(
+                {
+                    "text": text,
+                    "metadata": {
+                        "type": "station_info",
+                        "station_type": stype,
+                        "codigo": s["codigo"],
+                    },
+                }
+            )
     print(f"  {len(all_chunks)} station description chunks ready")
 
     # 2. Level stations — multithreaded
     print(f"\n→ Fetching level stations with {MAX_WORKERS} threads...")
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(process_level_station, s): s for s in classified["level"]}
+        futures = {
+            executor.submit(process_level_station, s): s for s in classified["level"]
+        }
         for future in as_completed(futures):
             try:
                 all_chunks.extend(future.result())
@@ -253,11 +375,12 @@ def run_ingestion():
     # 3. Precip stations — multithreaded
     print(f"\n→ Fetching precip stations with {MAX_WORKERS} threads...")
     precip_args = [
-        (s, precip_threshold_map.get(s["codigo"]))
-        for s in classified["precip"]
+        (s, precip_threshold_map.get(s["codigo"])) for s in classified["precip"]
     ]
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(process_precip_station, args): args for args in precip_args}
+        futures = {
+            executor.submit(process_precip_station, args): args for args in precip_args
+        }
         for future in as_completed(futures):
             try:
                 all_chunks.extend(future.result())
@@ -268,20 +391,25 @@ def run_ingestion():
     print(f"\n→ Embedding and uploading {len(all_chunks)} chunks to Qdrant...")
     points = []
     for i, chunk in enumerate(all_chunks):
-        points.append(PointStruct(
-            id=i + 1,
-            vector=embed(chunk["text"]),
-            payload={"text": chunk["text"], **chunk["metadata"]}
-        ))
+        points.append(
+            PointStruct(
+                id=i + 1,
+                vector=embed(chunk["text"]),
+                payload={"text": chunk["text"], **chunk["metadata"]},
+            )
+        )
 
     batch_size = 100
     for i in range(0, len(points), batch_size):
-        batch = points[i:i + batch_size]
+        batch = points[i : i + batch_size]
         upsert_points(batch)
         print(f"  Uploaded {min(i + batch_size, len(points))}/{len(points)}")
 
     elapsed = round(time.time() - start, 1)
-    print(f"\n✅ Ingestion complete — {len(points)} chunks stored in Qdrant in {elapsed}s")
+    print(
+        f"\n✅ Ingestion complete — {len(points)} chunks stored in Qdrant in {elapsed}s"
+    )
+
 
 if __name__ == "__main__":
     run_ingestion()
