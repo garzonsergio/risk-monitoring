@@ -1,6 +1,7 @@
 import os
 import requests
-from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta, timezone
 
 # from langchain_google_genai import ChatGoogleGenerativeAI
 # from langchain_openai import ChatOpenAI
@@ -13,9 +14,15 @@ from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
 from app.ingest.fetch_data import (
+    fetch_all_stations,
+    classify_stations,
     fetch_latest_level,
     fetch_level_thresholds,
     fetch_latest_precipitation,
+    fetch_latest_meteo,
+    fetch_recent_precipitation,
+    fetch_recent_meteo,
+    fetch_all_precip_thresholds,
     get_radar_url,
     BASE_URL,
     PRECIP_THRESHOLDS_URL,
@@ -24,6 +31,7 @@ from app.ingest.fetch_data import (
 load_dotenv()
 
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 COLLECTION_NAME = "antioquia_risk"
 # GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 RADAR_BOUNDS = [[5.1, -76.6], [7.3, -74.3]]
@@ -63,6 +71,7 @@ class LocalEmbeddings(Embeddings):
 def get_llm():
     return ChatOllama(
         model="llama3.1:8b",
+        base_url=OLLAMA_URL,
         temperature=0.2,
     )
 
@@ -88,8 +97,15 @@ def search_knowledge_base(query: str) -> str:
     retriever = get_retriever()
     docs = retriever.invoke(query)
     if not docs:
-        return "No relevant information found in the knowledge base."
-    return "\n\n---\n\n".join(d.page_content for d in docs)
+        return (
+            "KNOWLEDGE BASE RETURNED NO RESULTS for this query. "
+            "Do not invent data. Tell the user no information is available."
+        )
+    results = "\n\n---\n\n".join(d.page_content for d in docs)
+    return (
+        f"KNOWLEDGE BASE RESULTS ({len(docs)} chunks found — only use information "
+        f"explicitly present below, do not infer or invent anything else):\n\n{results}"
+    )
 
 
 @tool
@@ -198,6 +214,127 @@ def check_all_stations_status() -> str:
 
 
 @tool
+def check_active_rainfall() -> str:
+    """Check which stations are currently reporting active rainfall across
+    Antioquia, with alert levels calculated from duration-weighted thresholds.
+    Scans all precipitation (sp_) and meteorological (sm_) stations live.
+    Use this when asked where it is raining right now."""
+    try:
+        all_stations = fetch_all_stations()
+    except Exception as e:
+        return f"Could not fetch station list: {e}"
+
+    classified = classify_stations(all_stations)
+
+    try:
+        threshold_map = {t["estacion"]: t for t in fetch_all_precip_thresholds()}
+    except Exception:
+        threshold_map = {}
+
+    def calc_alert(
+        readings: list[dict], value_key: str, threshold: dict | None
+    ) -> tuple[str, float]:
+        """Returns (alert_label, accumulated_mm) for the highest triggered level."""
+        now = datetime.now(timezone.utc)
+
+        def rain_sum(hours: int) -> float:
+            cutoff = (now - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            return round(
+                sum(
+                    max(float(r.get(value_key, 0) or 0), 0)
+                    for r in readings
+                    if r["fecha"] >= cutoff
+                ),
+                1,
+            )
+
+        if threshold:
+            for level, label in [
+                ("rojo", "🔴 red"),
+                ("naranja", "🟠 orange"),
+                ("amarillo", "🟡 yellow"),
+            ]:
+                hours = int(threshold[f"duracion_{level}"])
+                umbral = float(threshold[f"umbral_{level}"])
+                total = rain_sum(hours)
+                if total >= umbral:
+                    return label, total
+
+        # Below all thresholds or no threshold — check if any rain in the last hour
+        last_hour = rain_sum(1)
+        if last_hour > 0:
+            return "✅ normal (below thresholds)", last_hour
+        return "dry", 0.0
+
+    def check_sp(station: dict) -> dict | None:
+        codigo = station["codigo"]
+        threshold = threshold_map.get(codigo)
+        readings = fetch_recent_precipitation(codigo, days=1)
+        alert, total = calc_alert(readings, "muestra", threshold)
+        if alert == "dry":
+            return None
+        return {
+            "codigo": codigo,
+            "ubicacion": station.get("ubicacion", codigo),
+            "municipio": station.get("municipio", "unknown"),
+            "alert": alert,
+            "total_mm": total,
+            "type": "precipitation",
+        }
+
+    def check_sm(station: dict) -> dict | None:
+        codigo = station["codigo"]
+        threshold = threshold_map.get(codigo)
+        readings = fetch_recent_meteo(codigo, hours=24)
+        alert, total = calc_alert(readings, "lluvia", threshold)
+        if alert == "dry":
+            return None
+        return {
+            "codigo": codigo,
+            "ubicacion": station.get("ubicacion", codigo),
+            "municipio": station.get("municipio", "unknown"),
+            "alert": alert,
+            "total_mm": total,
+            "type": "meteo",
+        }
+
+    active: list[dict] = []
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [
+            *[executor.submit(check_sp, s) for s in classified["precip"]],
+            *[executor.submit(check_sm, s) for s in classified["meteo"]],
+        ]
+        for future in as_completed(futures):
+            result = future.result()
+            if result:
+                active.append(result)
+
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    if not active:
+        return f"🌤 No active rainfall detected across any station at {now_str}."
+
+    level_order = {
+        "🔴 red": 0,
+        "🟠 orange": 1,
+        "🟡 yellow": 2,
+        "✅ normal (below thresholds)": 3,
+    }
+    active.sort(key=lambda x: (level_order.get(x["alert"], 4), -x["total_mm"]))
+
+    lines = [
+        f"🌧 Active rainfall at {now_str} — {len(active)} stations reporting rain:\n"
+    ]
+    for r in active:
+        source = "precip" if r["type"] == "precipitation" else "meteo"
+        lines.append(
+            f"  • {r['codigo']} ({source}) — {r['alert']} | "
+            f"{r['total_mm']} mm accumulated | "
+            f"{r['ubicacion']}, {r['municipio']}"
+        )
+    return "\n".join(lines)
+
+
+@tool
 def get_radar_image() -> str:
     """Get the current radar image URL showing where it is raining right now
     in Antioquia. Returns the URL and map bounds for overlay. Use this when
@@ -218,6 +355,7 @@ TOOLS = [
     search_knowledge_base,
     check_live_river_level,
     check_all_stations_status,
+    check_active_rainfall,
     get_radar_image,
 ]
 TOOLS_MAP = {t.name: t for t in TOOLS}
@@ -226,19 +364,30 @@ TOOLS_MAP = {t.name: t for t in TOOLS}
 
 SYSTEM_PROMPT = """You are a flood and climate risk advisor for Antioquia, Colombia.
 You have access to a real-time sensor network monitoring river levels and precipitation
-across the department, backed by historical data going back 30 days.
+across the department, backed by historical data covering the last 7 days.
 
-You have 4 tools:
-- search_knowledge_base: for historical patterns, thresholds, station info
-- check_live_river_level: for current level of a specific river station
+You have 5 tools:
+- search_knowledge_base: for historical patterns (last 7 days daily + last 24h hourly),
+  thresholds, station locations, and general context. Use this for questions about when
+  and where it rained over the past days or hours.
+- check_live_river_level: for the current level of a specific river station
 - check_all_stations_status: for a broad overview of alert status across all rivers
-- get_radar_image: for current rainfall location via radar
+- check_active_rainfall: for which stations are reporting rainfall right now (live scan
+  of all sp_ precipitation and sm_ meteorological stations)
+- get_radar_image: for spatial rainfall context via radar
 
 Guidelines:
+- ONLY report data that was explicitly returned by a tool. Never invent station names,
+  station IDs, locations, readings, or times that were not in the tool output.
+- If a tool returns no results or the data does not cover the requested time period,
+  say clearly that the data is not available. Do not fill in gaps with assumptions.
+- Station codes follow the format sn_XXXX (river level), sp_XXXX (precipitation),
+  sm_XXX (meteorological). Never reference station names or IDs not in the tool output.
 - Always compare live readings against thresholds to assess risk
-- Be specific — name stations, locations, and exact values
 - Use clear alert language: normal / yellow / orange / red
-- When relevant, mention the radar image for spatial rainfall context
+- For "where is it raining now" questions, use check_active_rainfall
+- For "when/where did it rain in the last 7 days" questions, use search_knowledge_base
+- When relevant, complement with get_radar_image for spatial context
 - Answer in the same language the user asks (Spanish or English)
 - Be concise but precise — this is an operational tool, not a chatbot
 """
