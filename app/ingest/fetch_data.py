@@ -78,16 +78,16 @@ def fetch_all_precip_thresholds() -> list[dict]:
 # ── Time-series data ──────────────────────────────────────────────────────────
 
 
-def fetch_recent_levels(station_codigo: str, days: int = 30) -> list[dict]:
-    """Fetch recent river level readings — max 2 pages to avoid overloading."""
+def fetch_recent_levels(station_codigo: str, days: int = 7) -> list[dict]:
+    """Fetch recent river level readings — up to 7 days of data."""
     since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
     readings = []
-    # size=288 = one reading every 5 min × 24h — enough for daily aggregation
+    # size=288 = one reading every 5 min × 24h — one page per day
     url = f"{BASE_URL}/estaciones/{station_codigo}/nivel/?calidad=1&size=288"
     pages_fetched = 0
-    max_pages = 6  # 6 pages × 288 readings = ~30 days at 5-min intervals
+    max_pages = 7  # 7 pages × 288 readings = ~7 days at 5-min intervals
 
     while url and pages_fetched < max_pages:
         try:
@@ -106,15 +106,15 @@ def fetch_recent_levels(station_codigo: str, days: int = 30) -> list[dict]:
     return readings
 
 
-def fetch_recent_precipitation(station_codigo: str, days: int = 30) -> list[dict]:
-    """Fetch recent precipitation readings — max 6 pages."""
+def fetch_recent_precipitation(station_codigo: str, days: int = 7) -> list[dict]:
+    """Fetch recent precipitation readings — up to 7 days of data."""
     since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
     readings = []
     url = f"{BASE_URL}/estaciones/{station_codigo}/precipitacion/?calidad=1&size=288"
     pages_fetched = 0
-    max_pages = 6
+    max_pages = 7
 
     while url and pages_fetched < max_pages:
         try:
@@ -155,6 +155,45 @@ def fetch_latest_precipitation(station_codigo: str) -> Optional[dict]:
         return values[0] if values else None
     except Exception:
         return None
+
+
+def fetch_latest_meteo(station_codigo: str) -> Optional[dict]:
+    """Fetch only the most recent meteorological reading for a station."""
+    try:
+        url = f"{BASE_URL}/estaciones/{station_codigo}/meteorologia/?calidad_lluvia=1&size=1"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        values = response.json().get("values", [])
+        return values[0] if values else None
+    except Exception:
+        return None
+
+
+def fetch_recent_meteo(station_codigo: str, hours: int = 24) -> list[dict]:
+    """Fetch recent meteorological readings for the last N hours."""
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    readings = []
+    url = f"{BASE_URL}/estaciones/{station_codigo}/meteorologia/?calidad_lluvia=1&size=288"
+    pages_fetched = 0
+    max_pages = 3  # 3 × 288 readings comfortably covers 24h at 5-min intervals
+
+    while url and pages_fetched < max_pages:
+        try:
+            response = requests.get(url, timeout=15)
+            response.raise_for_status()
+            data = response.json()
+            page_values = data.get("values", [])
+            filtered = [v for v in page_values if v["fecha"] >= since]
+            readings.extend(filtered)
+            pages_fetched += 1
+            if len(filtered) < len(page_values):
+                break
+            url = data.get("next")
+        except Exception:
+            break
+    return readings
 
 
 # ── Radar ─────────────────────────────────────────────────────────────────────
