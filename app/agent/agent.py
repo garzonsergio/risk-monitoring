@@ -1,10 +1,10 @@
 import os
+import time
+import traceback
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 
-# from langchain_google_genai import ChatGoogleGenerativeAI
-# from langchain_openai import ChatOpenAI
 from langchain_ollama import ChatOllama
 from langchain_qdrant import QdrantVectorStore
 from langchain.tools import tool
@@ -23,6 +23,10 @@ from app.ingest.fetch_data import (
     fetch_recent_precipitation,
     fetch_recent_meteo,
     fetch_all_precip_thresholds,
+    fetch_location_name,
+    fetch_precipitation_by_date,
+    fetch_meteo_by_date,
+    fetch_levels_by_date,
     get_radar_url,
     BASE_URL,
     PRECIP_THRESHOLDS_URL,
@@ -33,7 +37,6 @@ load_dotenv()
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 COLLECTION_NAME = "antioquia_risk"
-# GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 RADAR_BOUNDS = [[5.1, -76.6], [7.3, -74.3]]
 
 # ── Embedding wrapper ─────────────────────────────────────────────────────────
@@ -52,27 +55,12 @@ class LocalEmbeddings(Embeddings):
 
 # ── LLM + Retriever ───────────────────────────────────────────────────────────
 
-# def get_llm():
-#     return ChatGoogleGenerativeAI(
-#         model="gemini-2.0-flash",
-#         google_api_key=GEMINI_API_KEY,
-#         temperature=0.2,
-#     )
-
-# def get_llm():
-#     return ChatOpenAI(
-#         model="gpt-4o",
-#         api_key=os.getenv("GITHUB_COPILOT_TOKEN"),
-#         base_url="https://api.githubcopilot.com",
-#         temperature=0.2,
-#     )
-
 
 def get_llm():
     return ChatOllama(
         model="llama3.1:8b",
-        base_url=OLLAMA_URL,
-        temperature=0.2,
+        base_url=os.getenv("OLLAMA_URL", "http://localhost:11434"),
+        temperature=0,  # ← FIX 2: was 0.2 — 0 = deterministic, reduces hallucination
     )
 
 
@@ -91,9 +79,11 @@ def get_retriever():
 
 @tool
 def search_knowledge_base(query: str) -> str:
-    """Search historical data, thresholds, and station info stored in the
-    knowledge base. Use this for questions about past patterns, alert
-    thresholds, station locations, or general context about Antioquia sensors."""
+    """Search historical SUMMARIES, threshold values, and station metadata.
+    Use this ONLY for: station locations, alert threshold values, or general
+    context about the sensor network.
+    Do NOT use this for specific rainfall or level questions — use
+    check_precipitation_by_date or check_river_levels_by_date instead."""
     retriever = get_retriever()
     docs = retriever.invoke(query)
     if not docs:
@@ -153,51 +143,79 @@ def check_live_river_level(station_codigo: str) -> str:
 
 
 @tool
-def check_all_stations_status() -> str:
+def check_all_levels() -> str:
     """Check live status of ALL river level stations and flag any that are
     above alert thresholds. Use this for broad questions like 'which rivers
     are in alert?' or 'is there a flood risk anywhere in Antioquia?'"""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     try:
-        response = requests.get(f"{BASE_URL}/estaciones/", timeout=30)
-        response.raise_for_status()
-        stations = [
-            s
-            for s in response.json().get("values", [])
-            if s.get("codigo", "").startswith("sn_") and s.get("activo")
-        ]
+        all_stations = fetch_all_stations()
     except Exception as e:
         return f"Could not fetch station list: {e}"
 
-    alerts = {"red": [], "orange": [], "yellow": [], "normal": []}
+    classified = classify_stations(all_stations)
+    level_stations = classified["level"]
 
-    for station in stations:
+    def check_station(station):
         codigo = station["codigo"]
-        ubicacion = station.get("ubicacion", codigo)
+        ubicacion = (
+            station.get("ubicacion")
+            or station.get("descripcion")
+            or station.get("nombre_web")
+            or codigo
+        )
         latest = fetch_latest_level(codigo)
         if not latest:
-            continue
+            return None
         thresholds = fetch_level_thresholds(codigo)
         if not thresholds:
-            continue
+            return None
+        return {
+            "codigo": codigo,
+            "ubicacion": ubicacion,
+            "current": float(latest["nivel"]),
+            "thresholds": thresholds,
+        }
 
-        current = float(latest["nivel"])
-        if current >= thresholds["alerta_roja"]:
-            alerts["red"].append(
-                f"{codigo} at {ubicacion}: {current} cm (red threshold: {thresholds['alerta_roja']} cm)"
-            )
-        elif current >= thresholds["alerta_naranja"]:
-            alerts["orange"].append(
-                f"{codigo} at {ubicacion}: {current} cm (orange threshold: {thresholds['alerta_naranja']} cm)"
-            )
-        elif current >= thresholds["alerta_amarilla"]:
-            alerts["yellow"].append(
-                f"{codigo} at {ubicacion}: {current} cm (yellow threshold: {thresholds['alerta_amarilla']} cm)"
-            )
-        else:
-            alerts["normal"].append(codigo)
+    alerts = {"red": [], "orange": [], "yellow": [], "normal": []}
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(check_station, s): s for s in level_stations}
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                if not result:
+                    continue
+                current = result["current"]
+                t = result["thresholds"]
+                entry = (
+                    f"{result['codigo']} at {result['ubicacion']}: "
+                    f"{current} cm (red threshold: {t['alerta_roja']} cm)"
+                )
+                if current >= t["alerta_roja"]:
+                    alerts["red"].append(
+                        f"{result['codigo']} at {result['ubicacion']}: "
+                        f"{current} cm (red threshold: {t['alerta_roja']} cm)"
+                    )
+                elif current >= t["alerta_naranja"]:
+                    alerts["orange"].append(
+                        f"{result['codigo']} at {result['ubicacion']}: "
+                        f"{current} cm (orange threshold: {t['alerta_naranja']} cm)"
+                    )
+                elif current >= t["alerta_amarilla"]:
+                    alerts["yellow"].append(
+                        f"{result['codigo']} at {result['ubicacion']}: "
+                        f"{current} cm (yellow threshold: {t['alerta_amarilla']} cm)"
+                    )
+                else:
+                    alerts["normal"].append(result["codigo"])
+            except Exception:
+                continue
 
     lines = [
-        f"🌊 Live river status across Antioquia ({datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')})\n"
+        f"🌊 Live river status across Antioquia "
+        f"({datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')})\n"
     ]
     if alerts["red"]:
         lines.append(f"🔴 RED ALERT ({len(alerts['red'])} stations):")
@@ -219,6 +237,8 @@ def check_active_rainfall() -> str:
     Antioquia, with alert levels calculated from duration-weighted thresholds.
     Scans all precipitation (sp_) and meteorological (sm_) stations live.
     Use this when asked where it is raining right now."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     try:
         all_stations = fetch_all_stations()
     except Exception as e:
@@ -260,7 +280,6 @@ def check_active_rainfall() -> str:
                 if total >= umbral:
                     return label, total
 
-        # Below all thresholds or no threshold — check if any rain in the last hour
         last_hour = rain_sum(1)
         if last_hour > 0:
             return "✅ normal (below thresholds)", last_hour
@@ -273,10 +292,15 @@ def check_active_rainfall() -> str:
         alert, total = calc_alert(readings, "muestra", threshold)
         if alert == "dry":
             return None
+        ubicacion = (
+            station.get("ubicacion")
+            or station.get("descripcion")
+            or station.get("nombre_web")
+            or codigo
+        )
         return {
             "codigo": codigo,
-            "ubicacion": station.get("ubicacion", codigo),
-            "municipio": station.get("municipio", "unknown"),
+            "location": ubicacion,
             "alert": alert,
             "total_mm": total,
             "type": "precipitation",
@@ -289,10 +313,15 @@ def check_active_rainfall() -> str:
         alert, total = calc_alert(readings, "lluvia", threshold)
         if alert == "dry":
             return None
+        ubicacion = (
+            station.get("ubicacion")
+            or station.get("descripcion")
+            or station.get("nombre_web")
+            or codigo
+        )
         return {
             "codigo": codigo,
-            "ubicacion": station.get("ubicacion", codigo),
-            "municipio": station.get("municipio", "unknown"),
+            "location": ubicacion,
             "alert": alert,
             "total_mm": total,
             "type": "meteo",
@@ -305,9 +334,12 @@ def check_active_rainfall() -> str:
             *[executor.submit(check_sm, s) for s in classified["meteo"]],
         ]
         for future in as_completed(futures):
-            result = future.result()
-            if result:
-                active.append(result)
+            try:
+                result = future.result()
+                if result:
+                    active.append(result)
+            except Exception:
+                continue
 
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     if not active:
@@ -328,8 +360,7 @@ def check_active_rainfall() -> str:
         source = "precip" if r["type"] == "precipitation" else "meteo"
         lines.append(
             f"  • {r['codigo']} ({source}) — {r['alert']} | "
-            f"{r['total_mm']} mm accumulated | "
-            f"{r['ubicacion']}, {r['municipio']}"
+            f"{r['total_mm']} mm | {r['location']}"
         )
     return "\n".join(lines)
 
@@ -349,14 +380,199 @@ def get_radar_image() -> str:
     )
 
 
+@tool
+def check_precipitation_by_date(date_str: str) -> str:
+    """USE THIS TOOL when asked about past or yesterday's rainfall, precipitation,
+    or rain. This tool fetches REAL data from live sensors.
+    date_str format: YYYY-MM-DD
+    Example: '2026-03-21'
+    ALWAYS use this tool for any question containing words like:
+    'yesterday', 'ayer', 'last night', 'anoche', 'was it raining', 'llovió'"""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    try:
+        all_stations = fetch_all_stations()
+    except Exception as e:
+        return f"Could not fetch station list: {e}"
+
+    classified = classify_stations(all_stations)
+
+    def check_sp(station: dict) -> dict | None:
+        codigo = station["codigo"]
+        ubicacion = (
+            station.get("ubicacion")
+            or station.get("descripcion")
+            or station.get("nombre_web")
+            or codigo
+        )
+        readings = fetch_precipitation_by_date(codigo, date_str)
+        if not readings:
+            return None
+        total = round(sum(float(r["muestra"]) for r in readings), 1)
+        hours_with_rain = sorted(set(r["fecha"][11:13] for r in readings))
+        return {
+            "codigo": codigo,
+            "ubicacion": ubicacion,
+            "total_mm": total,
+            "hours": hours_with_rain,
+            "source": "precipitation",
+        }
+
+    def check_sm(station: dict) -> dict | None:
+        codigo = station["codigo"]
+        ubicacion = (
+            station.get("ubicacion")
+            or station.get("descripcion")
+            or station.get("nombre_web")
+            or codigo
+        )
+        readings = fetch_meteo_by_date(codigo, date_str)
+        if not readings:
+            return None
+        total = round(sum(float(r["lluvia"]) for r in readings), 1)
+        if total == 0:
+            return None
+        hours_with_rain = sorted(set(r["fecha"][11:13] for r in readings))
+        return {
+            "codigo": codigo,
+            "ubicacion": ubicacion,
+            "total_mm": total,
+            "hours": hours_with_rain,
+            "source": "meteo",
+        }
+
+    results = []
+    all_tasks = [(check_sp, s) for s in classified["precip"]] + [
+        (check_sm, s) for s in classified["meteo"]
+    ]
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(fn, station): station for fn, station in all_tasks}
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                if result:
+                    results.append(result)
+            except Exception:
+                continue
+
+    if not results:
+        return f"No rainfall recorded at any station on {date_str}."
+
+    results.sort(key=lambda x: x["total_mm"], reverse=True)
+
+    lines = [
+        f"📊 Precipitation report for {date_str} — "
+        f"{len(results)} stations with rainfall.\n"
+        f"IMPORTANT: Report ALL of this data including hours and locations exactly as shown:\n"
+    ]
+    for r in results[:20]:
+        hours_str = ", ".join(f"{h}:00" for h in r["hours"][:8])
+        if len(r["hours"]) > 8:
+            hours_str += f" (+{len(r['hours']) - 8} more hours)"
+        source_label = "precip" if r["source"] == "precipitation" else "meteo"
+        lines.append(
+            f"  • {r['codigo']} ({source_label}) | {r['ubicacion']} | "
+            f"{r['total_mm']} mm | hours: {hours_str}"
+        )
+
+    return "\n".join(lines)
+
+
+@tool
+def check_river_levels_by_date(date_str: str) -> str:
+    """Check river levels across all stations on a specific past date,
+    flagging any that exceeded alert thresholds. Use this when asked
+    about past flood risk or high river levels on a specific day.
+    date_str format: YYYY-MM-DD. Example: 2026-03-20"""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    try:
+        response = requests.get(f"{BASE_URL}/estaciones/", timeout=30)
+        response.raise_for_status()
+        stations = [
+            s
+            for s in response.json().get("values", [])
+            if s.get("codigo", "").startswith("sn_") and s.get("activo")
+        ]
+    except Exception as e:
+        return f"Could not fetch station list: {e}"
+
+    alerts = {"red": [], "orange": [], "yellow": [], "normal": []}
+
+    def check_station(station):
+        codigo = station["codigo"]
+        ubicacion = station.get("ubicacion", codigo)
+        readings = fetch_levels_by_date(codigo, date_str)
+        if not readings:
+            return None
+        thresholds = fetch_level_thresholds(codigo)
+        if not thresholds:
+            return None
+
+        levels = [float(r["nivel"]) for r in readings]
+        max_level = round(max(levels), 1)
+        avg_level = round(sum(levels) / len(levels), 1)
+        peak_hour = max(readings, key=lambda r: float(r["nivel"]))["fecha"][11:16]
+
+        return {
+            "codigo": codigo,
+            "ubicacion": ubicacion,
+            "max_level": max_level,
+            "avg_level": avg_level,
+            "peak_hour": peak_hour,
+            "thresholds": thresholds,
+        }
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(check_station, s): s for s in stations}
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                if not result:
+                    continue
+                t = result["thresholds"]
+                entry = (
+                    f"  • {result['codigo']} at {result['ubicacion']}: "
+                    f"max {result['max_level']} cm at {result['peak_hour']} "
+                    f"(avg {result['avg_level']} cm)"
+                )
+                if result["max_level"] >= t["alerta_roja"]:
+                    alerts["red"].append(entry)
+                elif result["max_level"] >= t["alerta_naranja"]:
+                    alerts["orange"].append(entry)
+                elif result["max_level"] >= t["alerta_amarilla"]:
+                    alerts["yellow"].append(entry)
+                else:
+                    alerts["normal"].append(result["codigo"])
+            except Exception:
+                continue
+
+    lines = [f"🌊 River level report for {date_str}:\n"]
+    if alerts["red"]:
+        lines.append(f"🔴 RED ALERT ({len(alerts['red'])} stations):")
+        lines.extend(alerts["red"])
+    if alerts["orange"]:
+        lines.append(f"\n🟠 ORANGE ALERT ({len(alerts['orange'])} stations):")
+        lines.extend(alerts["orange"])
+    if alerts["yellow"]:
+        lines.append(f"\n🟡 YELLOW ALERT ({len(alerts['yellow'])} stations):")
+        lines.extend(alerts["yellow"])
+    lines.append(f"\n✅ Normal: {len(alerts['normal'])} stations below all thresholds")
+
+    return "\n".join(lines)
+
+
 # ── Tools registry ────────────────────────────────────────────────────────────
 
 TOOLS = [
     search_knowledge_base,
     check_live_river_level,
-    check_all_stations_status,
+    check_all_levels,
     check_active_rainfall,
     get_radar_image,
+    check_precipitation_by_date,
+    check_river_levels_by_date,
 ]
 TOOLS_MAP = {t.name: t for t in TOOLS}
 
@@ -375,6 +591,7 @@ You have 5 tools:
 - check_active_rainfall: for which stations are reporting rainfall right now (live scan
   of all sp_ precipitation and sm_ meteorological stations)
 - get_radar_image: for spatial rainfall context via radar
+- check_precipitation_by_date: for rainfall data on a specific past date with hourly breakdown
 
 Guidelines:
 - ONLY report data that was explicitly returned by a tool. Never invent station names,
@@ -383,14 +600,24 @@ Guidelines:
   say clearly that the data is not available. Do not fill in gaps with assumptions.
 - Station codes follow the format sn_XXXX (river level), sp_XXXX (precipitation),
   sm_XXX (meteorological). Never reference station names or IDs not in the tool output.
-- Always compare live readings against thresholds to assess risk
-- Use clear alert language: normal / yellow / orange / red
-- For "where is it raining now" questions, use check_active_rainfall
-- For "when/where did it rain in the last 7 days" questions, use search_knowledge_base
-- When relevant, complement with get_radar_image for spatial context
-- Answer in the same language the user asks (Spanish or English)
-- Be concise but precise — this is an operational tool, not a chatbot
+- Always compare live readings against thresholds to assess risk.
+- Use clear alert language: normal / yellow / orange / red.
+- For "where is it raining now" questions, use check_active_rainfall.
+- For "when/where did it rain in the last 7 days" questions, use search_knowledge_base.
+- When relevant, complement with get_radar_image for spatial context.
+- Answer in the same language the user asks (Spanish or English).
+- Be concise but precise — this is an operational tool, not a chatbot.
+
+CRITICAL RULES — you must follow these without exception:
+- NEVER invent station codes, readings, or values. Only report data returned by tools.
+- If a tool returns no data for a question, say explicitly: "I don't have that data available."
+- If asked about YESTERDAY or a specific date use check_precipitation_by_date or check_river_levels_by_date — NEVER search_knowledge_base for this.
+- For ANY question with 'ayer', 'yesterday', 'llovió', 'was raining' → call check_precipitation_by_date first.
+- If asked for hourly data, say: "My knowledge base stores daily summaries only."
+- Never say "the search returned" and then invent results — only report actual tool output.
+- Answer in the same language the user asks (Spanish or English).
 """
+
 
 # ── Agent loop ────────────────────────────────────────────────────────────────
 
@@ -425,8 +652,9 @@ def ask(question: str) -> dict:
             if tool_fn:
                 try:
                     result = tool_fn.invoke(tool_args)
-                except Exception:
-                    result = tool_fn.invoke({})
+                except Exception as e:
+                    traceback.print_exc()
+                    result = f"Tool {tool_name} raised an error: {e}"
             else:
                 result = f"Tool {tool_name} not found."
 
