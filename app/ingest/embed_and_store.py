@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
-from sentence_transformers import SentenceTransformer
+from fastembed import TextEmbedding
 from app.ingest.fetch_data import (
     fetch_all_stations,
     classify_stations,
@@ -16,17 +16,17 @@ from app.ingest.fetch_data import (
 
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 COLLECTION_NAME = "antioquia_risk"
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 MAX_WORKERS = 10  # concurrent API calls
 
 client = QdrantClient(url=QDRANT_URL)
-model = SentenceTransformer(EMBEDDING_MODEL)
+model = TextEmbedding(EMBEDDING_MODEL)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
 def embed(text: str) -> list[float]:
-    return model.encode(text).tolist()
+    return next(model.embed([text])).tolist()
 
 
 def upsert_points(points: list[PointStruct]):

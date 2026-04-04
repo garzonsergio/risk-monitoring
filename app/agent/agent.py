@@ -11,7 +11,7 @@ from langchain.tools import tool
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.embeddings import Embeddings
 from qdrant_client import QdrantClient
-from sentence_transformers import SentenceTransformer
+from fastembed import TextEmbedding
 from dotenv import load_dotenv
 from app.ingest.fetch_data import (
     fetch_all_stations,
@@ -42,13 +42,13 @@ COLLECTION_NAME = "antioquia_risk"
 
 class LocalEmbeddings(Embeddings):
     def __init__(self):
-        self.model = SentenceTransformer("all-MiniLM-L6-v2")
+        self.model = TextEmbedding("sentence-transformers/all-MiniLM-L6-v2")
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        return self.model.encode(texts).tolist()
+        return [emb.tolist() for emb in self.model.embed(texts)]
 
     def embed_query(self, text: str) -> list[float]:
-        return self.model.encode(text).tolist()
+        return next(self.model.embed([text])).tolist()
 
 
 # ── LLM + Retriever ───────────────────────────────────────────────────────────
@@ -58,7 +58,7 @@ def get_llm():
     return ChatOllama(
         model="llama3.1:8b",
         base_url=os.getenv("OLLAMA_URL", "http://localhost:11434"),
-        temperature=0,  # ← FIX 2: was 0.2 — 0 = deterministic, reduces hallucination
+        temperature=0.2,  # ← FIX 2: was 0.2 — 0 = deterministic, reduces hallucination
     )
 
 
@@ -307,7 +307,7 @@ def check_active_rainfall() -> str:
     def check_sm(station: dict) -> dict | None:
         codigo = station["codigo"]
         threshold = threshold_map.get(codigo)
-        readings = fetch_recent_meteo(codigo, hours=24)
+        readings = fetch_recent_meteo(codigo, days=1)
         alert, total = calc_alert(readings, "lluvia", threshold)
         if alert == "dry":
             return None
@@ -471,21 +471,23 @@ def check_river_levels_by_date(date_str: str) -> str:
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     try:
-        response = requests.get(f"{BASE_URL}/estaciones/", timeout=30)
-        response.raise_for_status()
-        stations = [
-            s
-            for s in response.json().get("values", [])
-            if s.get("codigo", "").startswith("sn_") and s.get("activo")
-        ]
+        all_stations = fetch_all_stations()
     except Exception as e:
         return f"Could not fetch station list: {e}"
+
+    classified = classify_stations(all_stations)
+    stations = classified["level"]
 
     alerts = {"red": [], "orange": [], "yellow": [], "normal": []}
 
     def check_station(station):
         codigo = station["codigo"]
-        ubicacion = station.get("ubicacion", codigo)
+        ubicacion = (
+            station.get("ubicacion")
+            or station.get("descripcion")
+            or station.get("nombre_web")
+            or codigo
+        )
         readings = fetch_levels_by_date(codigo, date_str)
         if not readings:
             return None
@@ -546,6 +548,30 @@ def check_river_levels_by_date(date_str: str) -> str:
     return "\n".join(lines)
 
 
+@tool
+def check_full_network_status() -> str:
+    """Check the full status of ALL stations across the entire network right now.
+    Covers river level stations (sn_*) AND precipitation stations (sp_*, sm_*).
+    Use this for broad questions like:
+    - 'which stations are not in green?'
+    - 'where are the risk levels in red?'
+    - 'what is the overall status of the network?'
+    - 'are there any alerts anywhere in Antioquia?'
+    - 'which stations are in alert right now?'
+    ALWAYS use this tool when the question asks about ALL stations or overall network status.
+    """
+
+    level_result = check_all_levels.invoke({})
+    rainfall_result = check_active_rainfall.invoke({})
+
+    return (
+        f"=== RIVER LEVEL STATIONS (sn_*) ===\n"
+        f"{level_result}\n\n"
+        f"=== PRECIPITATION & METEO STATIONS (sp_* and sm_*) ===\n"
+        f"{rainfall_result}"
+    )
+
+
 # ── Tools registry ────────────────────────────────────────────────────────────
 
 TOOLS = [
@@ -553,6 +579,7 @@ TOOLS = [
     check_live_river_level,
     check_all_levels,
     check_active_rainfall,
+    check_full_network_status,
     check_precipitation_by_date,
     check_river_levels_by_date,
 ]
@@ -564,15 +591,18 @@ SYSTEM_PROMPT = """You are a flood and climate risk advisor for Antioquia, Colom
 You have access to a real-time sensor network monitoring river levels and precipitation
 across the department, backed by historical data covering the last 7 days.
 
-You have 5 tools:
+You have 7 tools:
 - search_knowledge_base: for historical patterns (last 7 days daily + last 24h hourly),
   thresholds, station locations, and general context. Use this for questions about when
   and where it rained over the past days or hours.
 - check_live_river_level: for the current level of a specific river station
-- check_all_stations_status: for a broad overview of alert status across all rivers
+- check_all_levels: broad overview of ALL sn_* river level stations alert status
 - check_active_rainfall: for which stations are reporting rainfall right now (live scan
   of all sp_ precipitation and sm_ meteorological stations)
 - check_precipitation_by_date: for rainfall data on a specific past date with hourly breakdown
+- check_river_levels_by_date: river level history on a specific past date for sn_* stations
+- check_full_network_status: FULL status of ALL stations (sn_* + sp_* + sm_*) — use
+  this for any broad question about overall network status or alerts across all types
 
 Guidelines:
 - ONLY report data that was explicitly returned by a tool. Never invent station names,
@@ -587,16 +617,19 @@ Guidelines:
 - For "when/where did it rain in the last 7 days" questions, use search_knowledge_base.
 - Answer in the same language the user asks (Spanish or English).
 - Be concise but precise — this is an operational tool, not a chatbot.
+- Never mention which tools you have or you use.
 
 CRITICAL RULES — you must follow these without exception:
-- NEVER invent station codes, readings, or values. Only report data returned by tools.
-- If a tool returns no data for a question, say explicitly: "I don't have that data available."
-- If asked about YESTERDAY or a specific date use check_precipitation_by_date or check_river_levels_by_date — NEVER search_knowledge_base for this.
-- For ANY question with 'ayer', 'yesterday', 'llovió', 'was raining' → call check_precipitation_by_date first.
-- If asked for hourly data, say: "My knowledge base stores daily summaries only."
-- Never say "the search returned" and then invent results — only report actual tool output.
+- NEVER invent station codes, readings, or values not present in tool output.
+- If a tool returns no data say: "No data available from sensors at this time."
+- For questions about RIGHT NOW or LIVE status → use the live tools, not search_knowledge_base.
+- For questions about HISTORICAL PATTERNS, CONTEXT, or THRESHOLDS → use search_knowledge_base.
+- For questions about A SPECIFIC PAST DATE → use check_precipitation_by_date or check_river_levels_by_date, not search_knowledge_base.
+- You can call multiple tools in sequence if needed — for example search_knowledge_base for context then check_live_river_level for current status.
 - Answer in the same language the user asks (Spanish or English).
-"""
+- Be concise but precise — this is an operational tool, not a chatbot.
+- Never mention which tools you used.
+    """
 
 
 # ── Agent loop ────────────────────────────────────────────────────────────────
@@ -613,16 +646,27 @@ def ask(question: str) -> dict:
         SystemMessage(content=SYSTEM_PROMPT),
         HumanMessage(content=question),
     ]
+    last_tool_results = []
 
-    for _ in range(5):  # max 5 iterations
+    for _ in range(5):
         response = llm.invoke(messages)
         messages.append(response)
 
-        # No tool calls — we have the final answer
         if not response.tool_calls:
+            # If content is empty but we have tool results, ask LLM to summarize
+            if not response.content.strip() and last_tool_results:
+                messages.append(
+                    HumanMessage(
+                        content=(
+                            "Using ONLY the sensor data above, answer the original question. "
+                            "Be specific — list stations, levels, and alert statuses exactly as shown."
+                        )
+                    )
+                )
+                response = llm.invoke(messages)
             break
 
-        # Execute each tool call and feed results back
+        last_tool_results = []
         for tool_call in response.tool_calls:
             tool_name = tool_call["name"]
             tool_args = tool_call["args"]
@@ -632,15 +676,17 @@ def ask(question: str) -> dict:
             if tool_fn:
                 try:
                     result = tool_fn.invoke(tool_args)
+                    grounded_result = f"REAL DATA FROM SENSORS:\n\n{result}"
+                    last_tool_results.append(grounded_result)
                 except Exception as e:
                     traceback.print_exc()
-                    result = f"Tool {tool_name} raised an error: {e}"
+                    grounded_result = f"Tool {tool_name} raised an error: {e}"
             else:
-                result = f"Tool {tool_name} not found."
+                grounded_result = f"Tool {tool_name} not found."
 
             messages.append(
                 ToolMessage(
-                    content=str(result),
+                    content=str(grounded_result),
                     tool_call_id=tool_call["id"],
                 )
             )

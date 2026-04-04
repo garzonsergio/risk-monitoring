@@ -3,7 +3,7 @@ langchain-openai
 langchain-qdrant
 langchain-ollama
 qdrant-client
-sentence-transformers
+fastembed
 fastapi
 uvicorn
 requests
