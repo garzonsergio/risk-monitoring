@@ -20,6 +20,20 @@ services:
     volumes:
       - ollama_models:/root/.ollama
 
+  scheduler:
+    build: .
+    command: python -m app.ingest.scheduler
+    env_file:
+      - .env
+    environment:
+      - QDRANT_URL=http://qdrant:6333
+      - INGESTION_INTERVAL_HOURS=6
+    depends_on:
+      - qdrant
+    volumes:
+      - zenml_data:/root/.zenml
+
 volumes:
   qdrant_data:
+  zenml_data:
   ollama_models:

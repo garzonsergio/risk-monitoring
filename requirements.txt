@@ -4,7 +4,10 @@ langchain-qdrant
 langchain-ollama
 qdrant-client
 fastembed
-fastapi
+fastapi==0.115.8
 uvicorn
 requests
 python-dotenv
+psutil>=6.0.0
+zenml[local]==0.94.1
+schedule
