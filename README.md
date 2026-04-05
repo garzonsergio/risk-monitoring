@@ -300,7 +300,7 @@ Config file locations:
 
 **2. Restart Claude Desktop** (Cmd+Q, then reopen)
 
-**3. Verify** — the 🔨 hammer icon in the chat input should show all 7 tools listed.
+**3. Verify** — click the **"+"** button in the chat input, then go to **Conectores / Connectors**. You should see `antioquia-risk-monitor` listed with a toggle. Enable it.
 
 **4. Ask questions directly in Claude Desktop:**
 
