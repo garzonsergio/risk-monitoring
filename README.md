@@ -92,6 +92,7 @@ The agent decides which tools to call based on the question — real agentic beh
 | `check_live_river_level`      | Current reading for a specific station vs its thresholds                                |
 | `check_all_levels`            | Broad scan — which rivers are in alert right now                                        |
 | `check_active_rainfall`       | Live rain risk scan across all sp* and sm* stations with duration-weighted alert levels |
+| `check_full_network_status`   | Full status of ALL stations (level + precipitation + meteo) in one call                 |
 | `check_precipitation_by_date` | Rainfall totals and hourly breakdown for a specific past date                           |
 | `check_river_levels_by_date`  | Peak river levels and alert status for a specific past date                             |
 
@@ -103,15 +104,18 @@ The agent decides which tools to call based on the question — real agentic beh
 
 ## Tech stack
 
-| Layer           | Technology                               | Why                                                     |
-| --------------- | ---------------------------------------- | ------------------------------------------------------- |
-| LLM             | Llama 3.1 via Ollama                     | Runs locally, no API cost, strong tool calling          |
-| Embeddings      | `sentence-transformers/all-MiniLM-L6-v2` | Free, local, fast — no external API needed              |
-| Vector DB       | Qdrant                                   | Purpose-built for vector search, easy Docker deployment |
-| Agent framework | LangChain                                | Tool binding and message loop                           |
-| API             | FastAPI                                  | Lightweight, async, auto-generates docs                 |
-| Ingestion       | Python + ThreadPoolExecutor              | Parallel fetching across 116 stations                   |
-| Deployment      | Docker Compose                           | Single command to run everything                        |
+| Layer              | Technology                               | Why                                                     |
+| ------------------ | ---------------------------------------- | ------------------------------------------------------- |
+| LLM                | Llama 3.1 via Ollama                     | Runs locally, no API cost, strong tool calling          |
+| Embeddings         | `sentence-transformers/all-MiniLM-L6-v2` | Free, local, fast — no external API needed              |
+| Vector DB          | Qdrant                                   | Purpose-built for vector search, easy Docker deployment |
+| Agent framework    | LangChain                                | Tool binding and message loop                           |
+| Pipeline orchestration | ZenML                                | Step tracking, versioning, and pipeline observability   |
+| API                | FastAPI                                  | Lightweight, async, auto-generates docs                 |
+| Ingestion          | Python + ThreadPoolExecutor              | Parallel fetching across 116 stations                   |
+| Scheduler          | `schedule` library                       | Runs ingestion pipeline every N hours (configurable)    |
+| MCP server         | MCP SDK (`mcp`)                          | Exposes agent tools to Claude Desktop via stdio         |
+| Deployment         | Docker Compose                           | Single command to run everything                        |
 
 ---
 
@@ -150,16 +154,23 @@ This starts:
 
 - `qdrant` on port `6333`
 - `app` (FastAPI) on port `8005`
+- `scheduler` — runs the ZenML ingestion pipeline immediately, then every 6 hours
 
-**3. Run the ingestion pipeline**
+**3. Run the ingestion pipeline manually (first time)**
 
-In a separate terminal, populate Qdrant with 7 days of sensor data:
+The scheduler will run automatically, but you can also trigger it manually:
 
 ```bash
-docker compose run --rm app python -m app.ingest.embed_and_store
+docker compose run --rm app python -m app.ingest.pipeline
 ```
 
 Takes ~2–3 minutes with parallel fetching across 116 stations.
+
+**View scheduler logs**
+
+```bash
+docker compose logs scheduler -f
+```
 
 **4. Ask a question**
 
@@ -195,7 +206,7 @@ docker run -d -p 6333:6333 --name qdrant qdrant/qdrant
 **3. Run the ingestion pipeline**
 
 ```bash
-python -m app.ingest.embed_and_store
+python -m app.ingest.pipeline
 ```
 
 **4. Start the API**
@@ -243,11 +254,14 @@ risk-monitoring/
 ├── app/
 │   ├── ingest/
 │   │   ├── fetch_data.py          # API clients for all SIGRAN endpoints
-│   │   └── embed_and_store.py     # Ingestion pipeline — 7-day daily + 24h hourly chunks
+│   │   ├── embed_and_store.py     # Embedding helpers + text chunk generators
+│   │   ├── pipeline.py            # ZenML pipeline (fetch → build chunks → store)
+│   │   └── scheduler.py           # Runs the ZenML pipeline every N hours
 │   ├── agent/
-│       └── agent.py               # LangChain agent + 6 tools
-│   └── api/
-│       └── main.py                # FastAPI endpoints
+│   │   └── agent.py               # LangChain agent + 7 tools
+│   ├── api/
+│   │   └── main.py                # FastAPI endpoints
+│   └── mcp_server.py              # MCP server — exposes tools to Claude Desktop
 ├── docker-compose.yml
 ├── Dockerfile
 ├── requirements.txt
@@ -258,12 +272,11 @@ risk-monitoring/
 
 ## What I'd add next
 
-- **Scheduled re-ingestion** — run the ingestion pipeline every 6 hours via APScheduler to keep historical data fresh
 - **Radar overlay** — integrate the [SIATA radar API](https://geoportal.siata.gov.co) as an agent tool returning a real-time reflectivity image URL with map bounds, enabling spatial rainfall context on a Leaflet.js map
-- **MCP protocol** — expose the agent tools over MCP so any MCP-compatible client (Claude Desktop, etc.) can connect
 - **Multi-location queries** — add municipality and region context to enable questions like "how is the Urabá region doing?"
 - **Alert notifications** — webhook or email when a station crosses into red alert
 - **Map visualization** — overlay sensor readings and radar on a Leaflet.js map using the coordinates and radar bounds already in the API response
+- **ZenML Cloud** — connect to ZenML Cloud for remote pipeline monitoring and run history
 
 ---
 
