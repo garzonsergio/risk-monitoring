@@ -270,6 +270,55 @@ risk-monitoring/
 
 ---
 
+## Using with Claude Desktop (MCP)
+
+The project includes an MCP server that exposes the same 7 agent tools directly to Claude Desktop — no Ollama or local LLM required. Claude Desktop provides the reasoning; the tools make the live API calls.
+
+### Setup
+
+**1. Add the server to `claude_desktop_config.json`**
+
+```json
+{
+  "mcpServers": {
+    "antioquia-risk-monitor": {
+      "command": "/path/to/risk-monitoring/venv/bin/python",
+      "args": ["-m", "app.mcp_server"],
+      "cwd": "/path/to/risk-monitoring",
+      "env": {
+        "PYTHONPATH": "/path/to/risk-monitoring"
+      }
+    }
+  }
+}
+```
+
+Config file locations:
+
+- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+
+**2. Restart Claude Desktop** (Cmd+Q, then reopen)
+
+**3. Verify** — the 🔨 hammer icon in the chat input should show all 7 tools listed.
+
+**4. Ask questions directly in Claude Desktop:**
+
+- _"Which rivers in Antioquia are in alert right now?"_
+- _"Where is it raining right now and is it risky?"_
+- _"What happened at station sn_1030 yesterday?"_
+
+### MCP vs FastAPI
+
+| Path                 | LLM                       | Entry point         |
+| -------------------- | ------------------------- | ------------------- |
+| MCP (Claude Desktop) | Claude (Anthropic)        | `app/mcp_server.py` |
+| FastAPI `/ask`       | Llama 3.1 (Ollama, local) | `app/api/main.py`   |
+
+Both paths call the same underlying tool functions — only the LLM layer differs.
+
+---
+
 ## What I'd add next
 
 - **Radar overlay** — integrate the [SIATA radar API](https://geoportal.siata.gov.co) as an agent tool returning a real-time reflectivity image URL with map bounds, enabling spatial rainfall context on a Leaflet.js map
