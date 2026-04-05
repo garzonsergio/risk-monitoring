@@ -176,3 +176,7 @@ pyrightconfig.json
 # End of https://www.toptal.com/developers/gitignore/api/python
 
 PROJECT_CONTEXT.md
+
+# ZenML
+.zen/config.yaml
+.zen/local_stores/
