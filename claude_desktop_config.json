@@ -1,0 +1,46 @@
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "~/Desktop"
+      ]
+    },
+    "postgres": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-postgres",
+        "postgresql://sergiocamilogarzonperez:8520@localhost:5432/formula1_2024"
+      ]
+    },
+    "weather": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "tsx",
+        "/Users/sergiocamilogarzonperez/Projects/personal/mcp-learn/main.ts"
+      ]
+    },
+    "antioquia-risk-monitor": {
+      "command": "/Users/sergiocamilogarzonperez/Projects/personal/risk-monitoring/venv/bin/python",
+      "args": ["-m", "app.mcp_server"],
+      "cwd": "/Users/sergiocamilogarzonperez/Projects/personal/risk-monitoring",
+      "env": {
+        "QDRANT_URL": "http://localhost:6333",
+        "OLLAMA_URL": "http://localhost:11434"
+      }
+    }
+  },
+  "preferences": {
+    "coworkWebSearchEnabled": true,
+    "coworkScheduledTasksEnabled": false,
+    "ccdScheduledTasksEnabled": false,
+    "quickEntryDictationShortcut": {
+      "accelerator": "Shift+Cmd+T"
+    },
+    "sidebarMode": "chat"
+  }
+}
