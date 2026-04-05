@@ -104,18 +104,18 @@ The agent decides which tools to call based on the question — real agentic beh
 
 ## Tech stack
 
-| Layer              | Technology                               | Why                                                     |
-| ------------------ | ---------------------------------------- | ------------------------------------------------------- |
-| LLM                | Llama 3.1 via Ollama                     | Runs locally, no API cost, strong tool calling          |
-| Embeddings         | `sentence-transformers/all-MiniLM-L6-v2` | Free, local, fast — no external API needed              |
-| Vector DB          | Qdrant                                   | Purpose-built for vector search, easy Docker deployment |
-| Agent framework    | LangChain                                | Tool binding and message loop                           |
-| Pipeline orchestration | ZenML                                | Step tracking, versioning, and pipeline observability   |
-| API                | FastAPI                                  | Lightweight, async, auto-generates docs                 |
-| Ingestion          | Python + ThreadPoolExecutor              | Parallel fetching across 116 stations                   |
-| Scheduler          | `schedule` library                       | Runs ingestion pipeline every N hours (configurable)    |
-| MCP server         | MCP SDK (`mcp`)                          | Exposes agent tools to Claude Desktop via stdio         |
-| Deployment         | Docker Compose                           | Single command to run everything                        |
+| Layer                  | Technology                               | Why                                                     |
+| ---------------------- | ---------------------------------------- | ------------------------------------------------------- |
+| LLM                    | Llama 3.1 via Ollama                     | Runs locally, no API cost, strong tool calling          |
+| Embeddings             | `sentence-transformers/all-MiniLM-L6-v2` | Free, local, fast — no external API needed              |
+| Vector DB              | Qdrant                                   | Purpose-built for vector search, easy Docker deployment |
+| Agent framework        | LangChain                                | Tool binding and message loop                           |
+| Pipeline orchestration | ZenML                                    | Step tracking, versioning, and pipeline observability   |
+| API                    | FastAPI                                  | Lightweight, async, auto-generates docs                 |
+| Ingestion              | Python + ThreadPoolExecutor              | Parallel fetching across 116 stations                   |
+| Scheduler              | `schedule` library                       | Runs ingestion pipeline every N hours (configurable)    |
+| MCP server             | MCP SDK (`mcp`)                          | Exposes agent tools to Claude Desktop via stdio         |
+| Deployment             | Docker Compose                           | Single command to run everything                        |
 
 ---
 
